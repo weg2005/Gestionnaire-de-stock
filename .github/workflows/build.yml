@@ -1,3 +1,4 @@
+
 name: Compilateur APK Kivy
 
 on:
@@ -109,15 +110,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           echo "Vérification des noms de fichiers > 90 caractères..."
+
           find projet -type f | while read -r filepath; do
             filename=$(basename "$filepath")
             dirpath=$(dirname "$filepath")
+
             if [ ${#filename} -gt 90 ]; then
               ext="${filename##*.}"
               base="${filename%.*}"
               new_filename="${base:0:60}_short.${ext}"
+
               mv "$filepath" "$dirpath/$new_filename"
+
               echo "Renommé : $filename -> $new_filename"
             fi
           done
@@ -139,10 +145,12 @@ jobs:
           import configparser
 
           path = Path("buildozer.spec")
+
           cfg = configparser.ConfigParser(
               interpolation=None,
               strict=False
           )
+
           cfg.optionxform = str
 
           with path.open(encoding="utf-8") as f:
@@ -162,8 +170,7 @@ jobs:
               "version": "1.0.0",
               "orientation": "portrait, landscape",
               "fullscreen": "0",
-              "requirements": "python3,kivy==2.3.0,fpdf,python-escpos,pyusb,Pillow,qrcode,pyserial,six,python-barcode,python-dateutil,pytz,kivy-garden.graph,pyjnius,android"
-              ,
+              "requirements": "python3,kivy==2.3.0,fpdf,python-escpos,pyusb,Pillow,qrcode,pyserial,six,python-barcode,python-dateutil,pytz,kivy-garden.graph,pyjnius,android",
               "android.api": "34",
               "android.minapi": "24",
               "android.ndk": "25b",
@@ -189,6 +196,99 @@ jobs:
           print("Configuration Buildozer créée.")
           PY
 
+      # ============================================================
+      # PRÉTÉLÉCHARGEMENT GRADLE 8.0.2
+      # ============================================================
+
+      - name: Pré-télécharger Gradle 8.0.2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLE_VERSION="8.0.2"
+
+          GRADLE_ZIP="gradle-${GRADLE_VERSION}-all.zip"
+
+          GRADLE_URL="https://github.com/gradle/gradle-distributions/releases/download/v${GRADLE_VERSION}/${GRADLE_ZIP}"
+
+          GRADLE_USER_HOME="${HOME}/.gradle"
+
+          export GRADLE_USER_HOME
+
+          # Calcul du hash exact utilisé par Gradle Wrapper.
+
+          HASH=$(python -c '
+          import hashlib
+          import sys
+
+          print(hashlib.md5(sys.argv[1].encode()).hexdigest())
+          ' "$GRADLE_URL")
+
+          CACHE_DIR="${GRADLE_USER_HOME}/wrapper/dists/gradle-${GRADLE_VERSION}-all/${HASH}"
+
+          mkdir -p "$CACHE_DIR"
+
+          TARGET="${CACHE_DIR}/${GRADLE_ZIP}"
+
+          if [ -f "$TARGET" ] && unzip -tq "$TARGET" >/dev/null 2>&1; then
+            echo "Gradle 8.0.2 est déjà présent dans le cache."
+            exit 0
+          fi
+
+          TMP="${RUNNER_TEMP}/${GRADLE_ZIP}"
+
+          rm -f "$TMP"
+
+          echo "Téléchargement de Gradle 8.0.2..."
+
+          # Premier serveur : téléchargement direct.
+
+          if ! curl -fL \
+            --retry 8 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            -o "$TMP" \
+            "https://downloads.gradle.org/distributions/${GRADLE_ZIP}"; then
+
+            echo "Premier téléchargement échoué."
+            echo "Essai avec le serveur alternatif..."
+
+            rm -f "$TMP"
+
+            curl -fL \
+              --retry 8 \
+              --retry-delay 10 \
+              --retry-all-errors \
+              --connect-timeout 30 \
+              --max-time 1800 \
+              -o "$TMP" \
+              "https://services.gradle.org/distributions/${GRADLE_ZIP}"
+          fi
+
+          # Vérifier l'archive avant de la placer dans le cache.
+
+          echo "Vérification de l'archive Gradle..."
+
+          unzip -tq "$TMP"
+
+          # Placer l'archive dans le cache officiel du Wrapper.
+
+          mv "$TMP" "$TARGET"
+
+          echo "Gradle 8.0.2 pré-téléchargé avec succès."
+
+          echo "URL du Wrapper : $GRADLE_URL"
+          echo "Hash du cache : $HASH"
+          echo "Archive : $TARGET"
+
+          ls -lh "$TARGET"
+
+      # ============================================================
+      # CORRECTIF TAR PAX
+      # ============================================================
+
       - name: Corriger TAR name too long
         shell: bash
         run: |
@@ -200,24 +300,39 @@ jobs:
           import tarfile
 
           # Forcer le format global par défaut à PAX
+
           tarfile.DEFAULT_FORMAT = tarfile.PAX_FORMAT
 
-          # Intercepter proprement la création d'en-tête ustar pour basculer en PAX en cas de dépassement
+          # Intercepter proprement la création d'en-tête ustar
+
           _original_create_ustar = tarfile.TarInfo.create_ustar_header
 
           def _safe_create_ustar(self, info, encoding, errors):
               try:
-                  return _original_create_ustar(self, info, encoding, errors)
+                  return _original_create_ustar(
+                      self,
+                      info,
+                      encoding,
+                      errors
+                  )
               except ValueError as e:
                   if "name is too long" in str(e):
-                      return self.create_pax_header(info, encoding, errors)
+                      return self.create_pax_header(
+                          info,
+                          encoding,
+                          errors
+                      )
                   raise
 
           tarfile.TarInfo.create_ustar_header = _safe_create_ustar
           PY
 
           echo "Correctif TAR PAX sécurisé appliqué."
-          
+
+      # ============================================================
+      # COMPILATION APK
+      # ============================================================
+
       - name: Compiler APK
         working-directory: projet
         shell: bash
@@ -229,10 +344,13 @@ jobs:
 
           export PYTHONPATH="$GITHUB_WORKSPACE/tar_patch${PYTHONPATH:+:$PYTHONPATH}"
 
+          export GRADLE_USER_HOME="$HOME/.gradle"
+
           mkdir -p "$GITHUB_WORKSPACE/apk"
 
-          buildozer -v android debug 2>&1 |
-            tee "$GITHUB_WORKSPACE/compilation.log"
+          LOG="$GITHUB_WORKSPACE/compilation.log"
+
+          buildozer -v android debug 2>&1 | tee "$LOG"
 
           result=${PIPESTATUS[0]}
 
@@ -249,11 +367,18 @@ jobs:
           if ! find "$GITHUB_WORKSPACE/apk" \
               -maxdepth 1 -type f -name "*.apk" |
               grep -q .; then
+
             echo "ERREUR : aucun APK n'a été produit."
             exit 1
           fi
 
+          echo "APK généré avec succès."
+
           ls -lh "$GITHUB_WORKSPACE/apk"
+
+      # ============================================================
+      # PUBLICATION APK
+      # ============================================================
 
       - name: Publier l'APK
         if: success()
@@ -263,6 +388,10 @@ jobs:
           path: apk/*.apk
           if-no-files-found: error
           retention-days: 7
+
+      # ============================================================
+      # PUBLICATION DES LOGS
+      # ============================================================
 
       - name: Publier les journaux
         if: always()
